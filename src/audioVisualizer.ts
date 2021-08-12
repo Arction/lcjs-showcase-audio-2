@@ -8,7 +8,6 @@ import {
     Dashboard,
     lightningChart,
     Themes,
-    DataPatterns,
     AxisScrollStrategies,
     FormattingRange,
     UIElementBuilders,
@@ -16,20 +15,17 @@ import {
     SolidLine,
     SolidFill,
     ColorHEX,
-    VisibleTicks,
-    IntensityGridSeries,
     ColorRGBA,
     LUT,
     PalettedFill,
     Axis,
     emptyLine,
-    emptyTick,
     emptyFill,
     NumericTickStrategy,
-    AxisTickStrategy,
     ChartOptions,
     PointMarker,
     UIBackground,
+    HeatmapScrollingGridSeriesIntensityValues,
 } from "@arction/lcjs"
 import {
     Scaler,
@@ -40,11 +36,11 @@ import {
     offSetScaler
 } from "./utils"
 
-// // Use theme if provided
+// Use theme if provided
 const urlParams = new URLSearchParams(window.location.search);
-let theme = Themes.dark
+let theme = Themes.darkGold
 if (urlParams.get('theme') == 'light') {
-    theme = Themes.light
+    theme = Themes.lightNew
     document.body.style.backgroundColor = '#fff'
     document.querySelector('label').style.color = '#000'
 }
@@ -142,17 +138,11 @@ export class AudioVisualizer {
         amplitude: LineSeries,
         history: LineSeries,
         maxAmplitude: LineSeries,
-        spectrogram: IntensityGridSeries
-        spectrogramAxis: Axis
+        spectrogram: HeatmapScrollingGridSeriesIntensityValues
     }
 
-    /**
-     * The 'time' of the last waveform data input point
-     */
-    private _lastTime: number = 0
-
-    private readonly _spectrogramDataCount = 256
     private readonly _waveformHistoryLength = 5
+    _waveformSampleIndex = 0
 
     constructor() {
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
@@ -175,7 +165,12 @@ export class AudioVisualizer {
         // mute audio output by default
         this._audioNodes.gain.gain.setValueAtTime(0, this._audioCtx.currentTime)
 
-        const spectrogramHistoryLength = this._spectrogramDataCount * (this._audioNodes.analyzer.fftSize / this._audioCtx.sampleRate)
+
+        // TODO: This doesn't work.
+        // Waveform history and Spectrogram are out of sync, because heatmap needs to know beforehand the frequency of incoming FFT data.
+        
+
+        const spectrogramHistoryLength = this._audioNodes.analyzer.fftSize / this._audioCtx.sampleRate
         const mScaler = multiplierScaler(this._audioCtx.sampleRate / this._audioNodes.analyzer.fftSize)
         const dScaler = dbScaler(this._audioNodes.analyzer)
         // setup audio processor
@@ -221,15 +216,21 @@ export class AudioVisualizer {
             this._series.timeDomain.clear()
             this._series.timeDomain.add(this._points.timeDomain)
 
-            // // add waveform data to the waveform series
-            const waveData = ArrayBufferToPointArray(this._data.timeDomain, offSetScaler(this._lastTime), freqScaler)
+            // add waveform data to the waveform series
+            const waveData = ArrayBufferToPointArray(
+                this._data.timeDomain, 
+                (n) => (this._waveformSampleIndex + n) * (1000 / this._audioCtx.sampleRate),
+                freqScaler
+            )
             this._series.waveform.add(waveData)
-            this._lastTime += waveData.length
+            this._waveformSampleIndex += waveData.length
 
             const freqData = Array.from(this._data.frequency)
-            this._series.spectrogram.addColumn(1, 'value', [freqData])
-            const lastTimeInS = this._lastTime / this._audioCtx.sampleRate
-            this._series.spectrogramAxis.setInterval(lastTimeInS - spectrogramHistoryLength, lastTimeInS)
+            this._series.spectrogram.addIntensityValues([freqData])
+
+            console.log('add ', waveData.length, 'waveform samples.', 
+                'add 1 spectrogram sample'
+            )
 
             this.update()
 
@@ -270,12 +271,13 @@ export class AudioVisualizer {
             timeDomain: this._setupChart({ columnIndex: 0, columnSpan: 2, rowIndex: 0, rowSpan: 1 }, 'Time Domain', 'Sample', 'Amplitude', [-1, 1]),
             waveformHistory: this._setupChart({ columnIndex: 0, columnSpan: 2, rowIndex: 1, rowSpan: 1 }, 'Waveform history', 'Time (s)', 'Amplitude', [-1, 1]),
             spectrum: this._setupChart({ columnIndex: 0, columnSpan: 1, rowIndex: 2, rowSpan: 1 }, 'Spectrum', 'Frequency (Hz)', 'dB', [0, 256]),
-            spectrogram: this._setupChart({ columnIndex: 1, columnSpan: 1, rowIndex: 2, rowSpan: 1 }, 'Spectrogram', 's', 'Frequency (Hz)', [0, maxFreq / 2])
+            spectrogram: this._setupChart({ columnIndex: 1, columnSpan: 1, rowIndex: 2, rowSpan: 1 }, 'Spectrogram', 's', 'Frequency (Hz)', [0, maxFreq])
         }
         this._charts.waveformHistory
             .getDefaultAxisX()
             .setScrollStrategy(AxisScrollStrategies.progressive)
-            .setInterval(0, this._audioCtx.sampleRate * this._waveformHistoryLength)
+            .setInterval(-this._waveformHistoryLength * 1000, 0)
+            .setTickStrategy(AxisTickStrategies.Time)
         this._charts.waveformHistory
             .getDefaultAxisY()
             .setMouseInteractions(false)
@@ -297,28 +299,16 @@ export class AudioVisualizer {
         this._charts.timeDomain
             .getDefaultAxisY()
             .setMouseInteractions(false)
-
-        // replace the default axis tick strategy formatter formatValue function
-        this._charts.waveformHistory.getDefaultAxisX().setTickStyle<'Numeric'>((style) => style
-            .setFormattingFunction((value: number, range: FormattingRange): string => {
-                return (value / this._audioCtx.sampleRate).toFixed(2)
-            })
-        )
-
-        this._charts.spectrogram
-            .getDefaultAxisX()
-            // Hide the default axis
-            .setNibStyle(emptyLine)
-            .setTickStrategy(AxisTickStrategies.Empty)
-            .setStrokeStyle(emptyLine)
-            .setTitleMargin(1)
-            .setTitleFillStyle(emptyFill)
-            // Set interval for the spectrogram
-            .setInterval(0, 1024)
+        
+        this._charts.spectrogram.getDefaultAxisX()
+            .setTitle('Time (s)')
+            .setTickStrategy(AxisTickStrategies.Time)
+            .setScrollStrategy(AxisScrollStrategies.progressive)
+            .setInterval(-10000, 0)
 
         // create series
         let seriesColor = '#fff'
-        if (theme == Themes.light)
+        if (theme == Themes.lightNew)
             seriesColor = '#0A7AAD'
         this._series = {
             timeDomain: this._setupSeries(this._charts.timeDomain, 'Time Domain', seriesColor, false),
@@ -326,8 +316,7 @@ export class AudioVisualizer {
             amplitude: this._setupSeries(this._charts.spectrum, 'Amplitude', '#0d0', false),
             history: this._setupSeries(this._charts.spectrum, 'Amplitude Decay', '#0aa', false),
             maxAmplitude: this._setupSeries(this._charts.spectrum, 'Amplitude Max', '#aa0', false),
-            spectrogram: this._setupIntensitySeries(this._charts.spectrogram, this._spectrogramDataCount, fBinCount / 2, maxFreq / 2, 'Spectrogram'),
-            spectrogramAxis: this._charts.spectrogram.addAxisX()
+            spectrogram: this._setupIntensitySeries(this._charts.spectrogram, this._audioNodes.analyzer.fftSize, fBinCount, maxFreq, 'Spectrogram')
         }
 
         // setup time-domain series
@@ -377,18 +366,6 @@ export class AudioVisualizer {
                 this._series.maxAmplitude.clear()
                 this._series.maxAmplitude.add(ArrayBufferToPointArray(this._data.maxHistory))
             })
-
-        this._series.spectrogramAxis
-            .setMouseInteractions(false)
-            .setTitle('Time (s)')
-            .setTitleFont(f => f.setSize(13))
-            .setTitleMargin(-5)
-            .setTickStrategy(AxisTickStrategies.Numeric, (tickStrategy: NumericTickStrategy) => tickStrategy
-                .setMajorTickStyle((tickStyle) => tickStyle
-                    .setTickPadding(0)
-                    .setLabelPadding(-5)
-                    .setLabelFont(f => f.setSize(12))
-                ))
     }
 
     /**
@@ -403,7 +380,7 @@ export class AudioVisualizer {
                 theme
             })
             .setSplitterStyle((style: SolidLine) => style.setThickness(5))
-        if (theme == Themes.dark)
+        if (theme == Themes.darkGold)
             this._db.setBackgroundStrokeStyle((s: SolidLine) => s.setThickness(0))
     }
 
@@ -472,7 +449,7 @@ export class AudioVisualizer {
      * @param chart Chart to which the series should be added to
      * @param name Name of the series
      */
-    private _setupIntensitySeries(chart: ChartXY, columnLength: number, columnCount: number, yMax: number, name: string): IntensityGridSeries {
+    private _setupIntensitySeries(chart: ChartXY, columnLength: number, columnCount: number, yMax: number, name: string): HeatmapScrollingGridSeriesIntensityValues {
         const palette = new LUT({
             steps: [
                 { value: 0, color: ColorRGBA(0, 0, 0) },
@@ -482,12 +459,19 @@ export class AudioVisualizer {
             ],
             interpolate: true
         })
-        const series = chart.addHeatmapSeries({
-            columns: columnLength,
-            rows: columnCount,
-            start: { x: 0, y: 0 },
-            end: { x: 1024, y: yMax },
-            pixelate: false,
+
+        console.log('create spectrogram series', columnLength, columnCount, yMax)
+
+        console.log(chart.getDefaultAxisX().getInterval(), this._audioNodes.analyzer.frequencyBinCount)
+
+        const series = chart.addHeatmapScrollingGridSeries({
+            heatmapDataType: 'intensity',
+            scrollDimension: 'columns',
+            resolution: columnCount,
+            step: {
+                x: 1,
+                y: yMax / columnCount
+            }
         })
             .setFillStyle(new PalettedFill({ lut: palette }))
             .setName(name)
